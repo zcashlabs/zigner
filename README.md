@@ -1,3 +1,6 @@
+> **WARNING:** Once again adding, this is an early prototype. Please do not use
+> it to custody any real funds. It is not safe for that purpose.
+
 # Zigner
 
 Zigner is a testnet-only, Android-first air-gapped signer prototype for Zcash.
