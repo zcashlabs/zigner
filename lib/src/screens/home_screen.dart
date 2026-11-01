@@ -16,7 +16,10 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   bool _busy = false;
-  bool _provisioned = false;
+  WalletStatus? _walletStatus;
+  bool _storageError = false;
+
+  bool get _provisioned => _walletStatus == WalletStatus.ready;
 
   @override
   void initState() {
@@ -25,8 +28,17 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _refreshProvisioning() async {
-    final value = await const SeedVault().isProvisioned;
-    if (mounted) setState(() => _provisioned = value);
+    if (!mounted) return;
+    setState(() {
+      _walletStatus = null;
+      _storageError = false;
+    });
+    try {
+      final status = await const SeedVault().status;
+      if (mounted) setState(() => _walletStatus = status);
+    } catch (_) {
+      if (mounted) setState(() => _storageError = true);
+    }
   }
 
   Future<void> _scan() async {
@@ -57,6 +69,32 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final loading = _walletStatus == null && !_storageError;
+    final (walletTitle, walletDetail) = _storageError
+        ? ('Wallet unavailable', 'Retry to open secure storage')
+        : switch (_walletStatus) {
+            WalletStatus.empty => (
+              'Wallet not set up',
+              'Create or import a testnet wallet',
+            ),
+            WalletStatus.backupPending => (
+              'Backup not confirmed',
+              'Confirm backup to enable signing.',
+            ),
+            WalletStatus.ready => (
+              'Testnet key ready',
+              'Seed encrypted with Android Keystore',
+            ),
+            null => ('Opening wallet…', 'Reading secure storage'),
+          };
+    final setupLabel = _storageError
+        ? 'Retry wallet access'
+        : switch (_walletStatus) {
+            WalletStatus.ready => 'Connect to Vizor Desktop',
+            WalletStatus.backupPending => 'Finish wallet backup',
+            WalletStatus.empty => 'Set up testnet wallet',
+            null => 'Opening wallet…',
+          };
     return Scaffold(
       body: SignerBackground(
         child: SafeArea(
@@ -142,12 +180,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       icon: _provisioned
                           ? Icons.key_rounded
                           : Icons.vpn_key_off_rounded,
-                      title: _provisioned
-                          ? 'Testnet key ready'
-                          : 'Wallet not set up',
-                      detail: _provisioned
-                          ? 'Seed encrypted with Android Keystore'
-                          : 'Create or import a testnet wallet',
+                      title: walletTitle,
+                      detail: walletDetail,
                       positive: _provisioned,
                     ),
                     Divider(height: 30, color: SignerColors.border),
@@ -168,9 +202,13 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 12),
               OutlinedButton.icon(
-                onPressed: _busy
+                onPressed: _busy || loading
                     ? null
                     : () async {
+                        if (_storageError) {
+                          await _refreshProvisioning();
+                          return;
+                        }
                         if (!_provisioned) {
                           await Navigator.of(context).push<bool>(
                             MaterialPageRoute(
@@ -189,11 +227,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 icon: Icon(
                   _provisioned ? Icons.qr_code_2 : Icons.add_circle_outline,
                 ),
-                label: Text(
-                  _provisioned
-                      ? 'Connect to Vizor Desktop'
-                      : 'Set up testnet wallet',
-                ),
+                label: Text(setupLabel),
               ),
               const SizedBox(height: 22),
               const Text(

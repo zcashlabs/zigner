@@ -63,7 +63,7 @@ Future<void> _start(WidgetTester tester) async {
   await _waitFor(tester, find.text('Wallet not set up'));
   expect(find.text('SECURE SESSION  ·  TESTNET'), findsOneWidget);
   await _tap(tester, find.text('Set up testnet wallet'));
-  await _waitFor(tester, find.text('Create or import a recovery phrase'));
+  await _waitFor(tester, find.text('Create new wallet'));
 }
 
 Future<void> _scanFixture(WidgetTester tester) async {
@@ -180,6 +180,27 @@ void main() {
     expect(bip39.validateMnemonic(phrase), isTrue);
     expect(phrase.split(' '), hasLength(24));
     expect(find.text(phrase), findsOneWidget);
+    expect(await _vault.isProvisioned, isFalse);
+    await expectLater(_vault.readSeed(), throwsStateError);
+    await tester.pageBack();
+    await _waitFor(tester, find.text('Backup not confirmed'));
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Scan Vizor request'),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(find.text('Connect to Vizor Desktop'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await tester.pumpWidget(const SignerApp());
+    await _waitFor(tester, find.text('Finish wallet backup'));
+    await _tap(tester, find.text('Finish wallet backup'));
+    await _waitFor(tester, find.text('I saved the backup'));
+    expect(find.text(phrase), findsOneWidget);
+    expect(await _vault.readMnemonicForBackup(), phrase);
     await _tap(tester, find.text('I saved the backup'));
     await _waitFor(tester, find.text('Testnet key ready'));
     expect(await _vault.readMnemonicForBackup(), phrase);
