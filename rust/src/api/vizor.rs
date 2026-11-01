@@ -390,6 +390,7 @@ mod tests {
 
     #[test]
     fn scanner_rejects_unrelated_ur_types() {
+        let _scanner = crate::vizor_flow_tests::SCANNER_TEST.lock().unwrap();
         reset_vizor_scan();
         assert_eq!(
             receive_vizor_ur_part("ur:bytes/abcd".to_owned()).unwrap_err(),

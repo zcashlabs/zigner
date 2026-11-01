@@ -105,6 +105,31 @@ flutter build apk --debug
 
 The debug APK is written beneath `build/app/outputs/flutter-apk/`.
 
+### CI
+
+Pushes and pull requests run Rust/Flutter checks and an Android signing flow:
+wallet setup, account export, QR assembly, rejection, approval, signing, and
+response display. The host verifies the emulator's returned signatures and
+viewing key against the original PCZTs. CI also checks the ARM64 APK's packaged
+permissions, debug flag, and native library.
+
+Use a disposable emulator; the test clears its wallet. With the pinned toolchains:
+
+```sh
+RUSTUP_TOOLCHAIN=1.97.0 bash integration_test/run_android.sh emulator-5554
+```
+
+The fixture uses a public test mnemonic. Regenerate it with:
+
+```sh
+RUSTUP_TOOLCHAIN=1.97.0 cargo test --locked --manifest-path rust/Cargo.toml --lib \
+  vizor_flow_tests::regenerate_signer_flow_fixture -- --ignored --exact
+```
+
+CI injects QR frames; optical scanning, proofs, broadcasting, and real-device
+security remain separate checks. The release-mode APK retains prototype debug
+signing. Toolchain versions are pinned in `.github/workflows/ci.yml`.
+
 ## Architecture
 
 ```text
