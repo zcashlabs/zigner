@@ -196,7 +196,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     await tester.pumpWidget(const SignerApp());
-    await _waitFor(tester, find.text('Finish wallet backup'));
+    await _waitFor(tester, find.text('Backup not confirmed'));
     await _tap(tester, find.text('Finish wallet backup'));
     await _waitFor(tester, find.text('I saved the backup'));
     expect(find.text(phrase), findsOneWidget);
