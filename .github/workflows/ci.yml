@@ -76,6 +76,7 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
       - name: Install the pinned Android build tools
         run: |
           sdkmanager "platforms;android-${ANDROID_API_LEVEL}" "build-tools;36.0.0" "ndk;${ANDROID_NDK_VERSION}"
