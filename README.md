@@ -23,10 +23,10 @@ are implemented in Rust and exposed through `flutter_rust_bridge`.
 - Export account 0's testnet UFVK as an animated `zcash-accounts` UR.
 - Import that watch-only account into the compatible Vizor desktop prototype.
 - Scan animated `zcash-sign-batch` requests containing compact PCZTs.
-- Display transaction details for user approval.
+- Verify output commitments and recipient addresses before user approval.
 - Sign account 0 Orchard and Ironwood spends.
 - Return signatures as an animated `zcash-batch-sig-result` UR.
-- Reject mainnet requests, transparent spends, and Sapling spends.
+- Reject unverifiable outputs, wrong-network addresses, and unsupported pools.
 
 Release and profile Android manifests do not request `INTERNET`. The debug
 manifest requests it only so Flutter's development VM service and hot reload

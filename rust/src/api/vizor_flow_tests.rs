@@ -558,6 +558,230 @@ fn signer_flow_rejects_wrong_seed_and_malformed_requests() {
     assert!(sign_vizor_batch(unsupported, bytes(&value, "seedHex"), 0).is_err());
 }
 
+fn request_cbor(pczts: Vec<Pczt>) -> Vec<u8> {
+    ZcashSignBatch::new(
+        REQUEST_ID.to_vec(),
+        BatchSignRequest::new(pczts).serialize().unwrap(),
+    )
+    .try_into()
+    .unwrap()
+}
+
+fn alter_output(pczt: Pczt, pool: &str, index: usize, field: &str, value: Value) -> Pczt {
+    let wire = pczt::v2::Pczt::try_from(pczt).unwrap();
+    let mut document = serde_json::to_value(wire).unwrap();
+    let output = &mut document[pool]["actions"][index]["output"];
+    assert!(
+        output.get(field).is_some(),
+        "existing output field: {field}"
+    );
+    output[field] = value;
+    let wire: pczt::v2::Pczt = serde_json::from_value(document).unwrap();
+    Pczt::parse(&wire.serialize()).unwrap()
+}
+
+#[test]
+fn review_and_signing_reject_spoofed_output_address() {
+    let value = fixture();
+    let mut pczts = fixture_pczts(&value);
+    let original = pczts[0].clone();
+    let output_index = original
+        .ironwood()
+        .actions()
+        .iter()
+        .position(|action| action.output().value().is_some_and(|value| value > 0))
+        .unwrap();
+    let wrong_recipient =
+        FullViewingKey::from(seed_account().orchard()).address_at(0u32, Scope::External);
+    let wrong_address = UnifiedAddress::from_receivers(Some(wrong_recipient), None)
+        .unwrap()
+        .encode(&Network::TestNetwork);
+    pczts[0] = alter_output(
+        original.clone(),
+        "ironwood",
+        output_index,
+        "user_address",
+        json!(wrong_address),
+    );
+    assert_eq!(
+        Signer::new(original).unwrap().shielded_sighash(),
+        Signer::new(pczts[0].clone()).unwrap().shielded_sighash()
+    );
+    let cbor = request_cbor(pczts);
+    let review_rejected = inspect_vizor_batch(cbor.clone()).is_err();
+    let signing_rejected = sign_vizor_batch(cbor, bytes(&value, "seedHex"), 0).is_err();
+    assert!(review_rejected && signing_rejected,
+        "spoofed output address accepted: review_rejected={review_rejected}, signing_rejected={signing_rejected}");
+}
+
+fn assert_review_and_signing_reject(pczts: Vec<Pczt>) {
+    let cbor = request_cbor(pczts);
+    assert!(inspect_vizor_batch(cbor.clone()).is_err());
+    assert!(sign_vizor_batch(cbor, hex::decode(SEED_HEX).unwrap(), 0).is_err());
+}
+
+#[test]
+fn review_and_signing_reject_changed_output_metadata() {
+    let originals = fixture_pczts(&fixture());
+    let key = orchard::keys::SpendingKey::from_bytes([200; 32]).unwrap();
+    let recipient = FullViewingKey::from(&key).address_at(0u32, Scope::External);
+    for (tx_index, pczt) in originals.iter().enumerate() {
+        let sighash = Signer::new(pczt.clone()).unwrap().shielded_sighash();
+        for (pool, bundle) in [("orchard", pczt.orchard()), ("ironwood", pczt.ironwood())] {
+            for (index, action) in bundle.actions().iter().enumerate() {
+                for (field, replacement) in [
+                    ("value", json!(action.output().value().unwrap() + 1)),
+                    (
+                        "recipient",
+                        json!(recipient.to_raw_address_bytes().to_vec()),
+                    ),
+                    ("rseed", json!(vec![42u8; 32])),
+                ] {
+                    let changed = alter_output(pczt.clone(), pool, index, field, replacement);
+                    assert_eq!(
+                        Signer::new(changed.clone()).unwrap().shielded_sighash(),
+                        sighash
+                    );
+                    let mut pczts = originals.clone();
+                    pczts[tx_index] = changed;
+                    assert_review_and_signing_reject(pczts);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn review_and_signing_reject_incomplete_output_details() {
+    let originals = fixture_pczts(&fixture());
+    for (tx_index, pczt) in originals.iter().enumerate() {
+        for (pool, bundle) in [("orchard", pczt.orchard()), ("ironwood", pczt.ironwood())] {
+            for index in 0..bundle.actions().len() {
+                for field in ["value", "recipient", "rseed"] {
+                    let mut pczts = originals.clone();
+                    pczts[tx_index] = alter_output(pczt.clone(), pool, index, field, Value::Null);
+                    assert_review_and_signing_reject(pczts);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn review_and_signing_reject_wrong_network_and_unsupported_addresses() {
+    let originals = fixture_pczts(&fixture());
+    let transparent = zcash_keys::address::Address::Transparent(
+        transparent::address::TransparentAddress::PublicKeyHash([7; 20]),
+    )
+    .encode(&Network::TestNetwork);
+    for (tx_index, pczt) in originals.iter().enumerate() {
+        for (pool, bundle) in [("orchard", pczt.orchard()), ("ironwood", pczt.ironwood())] {
+            for (index, action) in bundle.actions().iter().enumerate() {
+                let mainnet = UnifiedAddress::from_receivers(
+                    action
+                        .output()
+                        .recipient()
+                        .map(|bytes| orchard::Address::from_raw_address_bytes(&bytes).unwrap()),
+                    None,
+                )
+                .unwrap()
+                .encode(&Network::MainNetwork);
+                for address in [mainnet, transparent.clone(), "not-an-address".to_owned()] {
+                    let mut pczts = originals.clone();
+                    pczts[tx_index] =
+                        alter_output(pczt.clone(), pool, index, "user_address", json!(address));
+                    assert_review_and_signing_reject(pczts);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn review_and_signing_reject_unreviewed_output_pools() {
+    let original = fixture_pczts(&fixture())[0].clone();
+    let transparent = json!({
+        "inputs": [],
+        "outputs": [{"value": 1, "script_pubkey": [106], "bip32_derivation": {}, "proprietary": {}}]
+    });
+    let sapling = json!({
+        "spends": [], "value_sum": 0,
+        "outputs": [{
+            "cv": vec![0u8; 32], "cmu": vec![0u8; 32], "ephemeral_key": vec![0u8; 32],
+            "enc_ciphertext": vec![0u8; 580], "out_ciphertext": vec![0u8; 80], "proprietary": {}
+        }]
+    });
+    for (pool, bundle) in [("transparent", transparent), ("sapling", sapling)] {
+        let wire = pczt::v2::Pczt::try_from(original.clone()).unwrap();
+        let mut document = serde_json::to_value(wire).unwrap();
+        document[pool] = bundle;
+        let wire: pczt::v2::Pczt = serde_json::from_value(document).unwrap();
+        let pczt = Pczt::parse(&wire.serialize()).unwrap();
+        assert_review_and_signing_reject(vec![pczt]);
+    }
+}
+
+#[test]
+fn review_derives_missing_display_addresses_from_verified_receivers() {
+    let value = fixture();
+    let pczts = fixture_pczts(&value)
+        .into_iter()
+        .map(|pczt| {
+            Redactor::new(pczt)
+                .redact_orchard_with(|mut bundle| {
+                    bundle.redact_actions(|mut action| action.clear_output_user_address());
+                })
+                .redact_ironwood_with(|mut bundle| {
+                    bundle.redact_actions(|mut action| action.clear_output_user_address());
+                })
+                .finish()
+        })
+        .collect();
+    let cbor = request_cbor(pczts);
+    let review = inspect_vizor_batch(cbor.clone()).unwrap();
+    let original = inspect_vizor_batch(bytes(&value, "requestCborHex")).unwrap();
+    assert_eq!(review.outputs, original.outputs);
+    assert_eq!(
+        review.visible_output_total_zat,
+        original.visible_output_total_zat
+    );
+    let signed = sign_vizor_batch(cbor, bytes(&value, "seedHex"), 0).unwrap();
+    verify_response(&value, &parts(&value, "accountUrParts"), &signed.ur_parts).unwrap();
+}
+
+#[test]
+fn review_accepts_a_matching_receiver_in_a_multireceiver_address() {
+    let value = fixture();
+    let mut pczts = fixture_pczts(&value);
+    let recipient = pczts[0].ironwood().actions()[0]
+        .output()
+        .recipient()
+        .map(|bytes| orchard::Address::from_raw_address_bytes(&bytes).unwrap());
+    let address = UnifiedAddress::from_receivers(
+        recipient,
+        Some(transparent::address::TransparentAddress::PublicKeyHash(
+            [7; 20],
+        )),
+    )
+    .unwrap()
+    .encode(&Network::TestNetwork);
+    pczts[0] = alter_output(
+        pczts[0].clone(),
+        "ironwood",
+        0,
+        "user_address",
+        json!(address),
+    );
+    let cbor = request_cbor(pczts);
+    let review = inspect_vizor_batch(cbor.clone()).unwrap();
+    assert!(review
+        .outputs
+        .iter()
+        .any(|output| output.ends_with(&address)));
+    let signed = sign_vizor_batch(cbor, bytes(&value, "seedHex"), 0).unwrap();
+    verify_response(&value, &parts(&value, "accountUrParts"), &signed.ur_parts).unwrap();
+}
+
 #[test]
 fn response_verifier_rejects_tampered_signatures_and_order() {
     let value = fixture();
