@@ -1,8 +1,11 @@
 use std::sync::{LazyLock, Mutex};
 
-use pczt::roles::signer::{
-    batch::{BatchSignRequest, BatchSignResponse},
-    extract_orchard_spend_auth_signatures, Signer,
+use pczt::roles::{
+    signer::{
+        batch::{BatchSignRequest, BatchSignResponse},
+        extract_orchard_spend_auth_signatures, Signer,
+    },
+    verifier::{OrchardError, Verifier},
 };
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use sha2::Digest;
@@ -14,7 +17,10 @@ use ur_registry::{
         zcash_unified_full_viewing_key::ZcashUnifiedFullViewingKey,
     },
 };
-use zcash_keys::keys::UnifiedSpendingKey;
+use zcash_keys::{
+    address::{Address, UnifiedAddress},
+    keys::UnifiedSpendingKey,
+};
 use zcash_protocol::consensus::Network;
 use zip32::{fingerprint::SeedFingerprint, AccountId};
 
@@ -159,19 +165,50 @@ fn decode_batch(cbor: Vec<u8>) -> Result<(ZcashSignBatch, BatchSignRequest), Str
     Ok((envelope, request))
 }
 
+fn collect_verified_outputs(
+    bundle: &orchard::pczt::Bundle,
+    outputs: &mut Vec<(u64, String)>,
+) -> Result<(), OrchardError<&'static str>> {
+    for action in bundle.actions() {
+        let output = action.output();
+        output.verify_note_commitment(action.spend())?;
+        let recipient = output
+            .recipient()
+            .ok_or(orchard::pczt::VerifyError::MissingRecipient)?;
+        let value = output
+            .value()
+            .ok_or(orchard::pczt::VerifyError::MissingValue)?;
+        let address = match output.user_address().as_deref() {
+            Some(encoded) => match Address::decode(&Network::TestNetwork, encoded) {
+                Some(Address::Unified(address)) if address.orchard() == Some(&recipient) => address,
+                _ => {
+                    return Err(OrchardError::Custom(
+                        "Output address does not match its testnet recipient.",
+                    ))
+                }
+            },
+            None => UnifiedAddress::from_receivers(Some(recipient), None)
+                .ok_or(OrchardError::Custom("Invalid output recipient."))?,
+        };
+        outputs.push((value.inner(), address.encode(&Network::TestNetwork)));
+    }
+    Ok(())
+}
+
 #[flutter_rust_bridge::frb(sync)]
 pub fn inspect_vizor_batch(cbor: Vec<u8>) -> Result<BatchReview, String> {
     let (envelope, request) = decode_batch(cbor.clone())?;
     let mut orchard_spends = 0usize;
     let mut ironwood_spends = 0usize;
     let mut visible_output_total = 0u64;
-    let mut hidden_values = false;
     let mut outputs = Vec::new();
     for pczt in request.pczts() {
-        if !pczt.transparent().inputs().is_empty() || !pczt.sapling().spends().is_empty() {
-            return Err(
-                "This signer currently accepts Orchard and Ironwood spends only.".to_owned(),
-            );
+        if !pczt.transparent().inputs().is_empty()
+            || !pczt.transparent().outputs().is_empty()
+            || !pczt.sapling().spends().is_empty()
+            || !pczt.sapling().outputs().is_empty()
+        {
+            return Err("This signer only reviews Orchard and Ironwood transactions.".to_owned());
         }
         orchard_spends += pczt
             .orchard()
@@ -185,46 +222,33 @@ pub fn inspect_vizor_batch(cbor: Vec<u8>) -> Result<BatchReview, String> {
             .iter()
             .filter(|action| action.spend().spend_auth_sig().is_none())
             .count();
-        for action in pczt
-            .orchard()
-            .actions()
-            .iter()
-            .chain(pczt.ironwood().actions().iter())
-        {
-            let value_label = action
-                .output()
-                .value()
-                .map(|value| format!("{value} zat"))
-                .unwrap_or_else(|| "redacted value".to_owned());
-            let address = action
-                .output()
-                .user_address()
-                .as_deref()
-                .unwrap_or("redacted recipient");
-            outputs.push(format!("{value_label} → {address}"));
-            match action.output().value() {
-                Some(value) => {
-                    visible_output_total = visible_output_total
-                        .checked_add(*value)
-                        .ok_or_else(|| "Visible output total overflowed u64".to_owned())?;
+        let mut verified_outputs = Vec::new();
+        Verifier::new(pczt.clone())
+            .with_orchard(|bundle| collect_verified_outputs(bundle, &mut verified_outputs))
+            .and_then(|verifier| {
+                verifier
+                    .with_ironwood(|bundle| collect_verified_outputs(bundle, &mut verified_outputs))
+            })
+            .map_err(|error| match error {
+                OrchardError::Custom(message) => message.to_owned(),
+                _ => {
+                    "Cannot verify transaction outputs. Request complete output details.".to_owned()
                 }
-                None => hidden_values = true,
-            }
+            })?;
+        for (value, address) in verified_outputs {
+            visible_output_total = visible_output_total
+                .checked_add(value)
+                .ok_or_else(|| "Visible output total overflowed u64".to_owned())?;
+            outputs.push(format!("{value} zat → {address}"));
         }
     }
     let signature_count = orchard_spends + ironwood_spends;
     if signature_count == 0 || signature_count > MAX_BATCH_SIGNATURES {
         return Err("Vizor signing batch has an unsupported signature count.".to_owned());
     }
-    let mut warnings = vec![
+    let warnings = vec![
         "Testnet only. Confirm the transaction details shown in Vizor before signing.".to_owned(),
     ];
-    if hidden_values {
-        warnings.push(
-            "Some output values are redacted in the compact PCZT; the displayed total is incomplete."
-                .to_owned(),
-        );
-    }
     Ok(BatchReview {
         request_id_hex: hex::encode(envelope.get_request_id()),
         transaction_count: request.pczts().len() as u32,
@@ -390,6 +414,7 @@ mod tests {
 
     #[test]
     fn scanner_rejects_unrelated_ur_types() {
+        let _scanner = crate::vizor_flow_tests::SCANNER_TEST.lock().unwrap();
         reset_vizor_scan();
         assert_eq!(
             receive_vizor_ur_part("ur:bytes/abcd".to_owned()).unwrap_err(),

@@ -23,10 +23,10 @@ are implemented in Rust and exposed through `flutter_rust_bridge`.
 - Export account 0's testnet UFVK as an animated `zcash-accounts` UR.
 - Import that watch-only account into the compatible Vizor desktop prototype.
 - Scan animated `zcash-sign-batch` requests containing compact PCZTs.
-- Display transaction details for user approval.
+- Verify output commitments and recipient addresses before user approval.
 - Sign account 0 Orchard and Ironwood spends.
 - Return signatures as an animated `zcash-batch-sig-result` UR.
-- Reject mainnet requests, transparent spends, and Sapling spends.
+- Reject unverifiable outputs, wrong-network addresses, and unsupported pools.
 
 Release and profile Android manifests do not request `INTERNET`. The debug
 manifest requests it only so Flutter's development VM service and hot reload
@@ -104,6 +104,31 @@ flutter build apk --debug
 ```
 
 The debug APK is written beneath `build/app/outputs/flutter-apk/`.
+
+### CI
+
+Pushes and pull requests run Rust/Flutter checks and an Android signing flow:
+wallet setup, account export, QR assembly, rejection, approval, signing, and
+response display. The host verifies the emulator's returned signatures and
+viewing key against the original PCZTs. CI also checks the ARM64 APK's packaged
+permissions, debug flag, and native library.
+
+Use a disposable emulator; the test clears its wallet. With the pinned toolchains:
+
+```sh
+RUSTUP_TOOLCHAIN=1.97.0 bash integration_test/run_android.sh emulator-5554
+```
+
+The fixture uses a public test mnemonic. Regenerate it with:
+
+```sh
+RUSTUP_TOOLCHAIN=1.97.0 cargo test --locked --manifest-path rust/Cargo.toml --lib \
+  vizor_flow_tests::regenerate_signer_flow_fixture -- --ignored --exact
+```
+
+CI injects QR frames; optical scanning, proofs, broadcasting, and real-device
+security remain separate checks. The release-mode APK retains prototype debug
+signing. Toolchain versions are pinned in `.github/workflows/ci.yml`.
 
 ## Architecture
 
