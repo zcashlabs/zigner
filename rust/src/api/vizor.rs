@@ -243,6 +243,7 @@ pub fn sign_vizor_batch(
     seed: Vec<u8>,
     account_index: u32,
 ) -> Result<SignedBatch, String> {
+    let seed = zeroize::Zeroizing::new(seed);
     if !(32..=252).contains(&seed.len()) {
         return Err("The wallet seed length is invalid.".to_owned());
     }
@@ -343,6 +344,7 @@ pub fn export_testnet_account(
     account_index: u32,
     name: String,
 ) -> Result<Vec<String>, String> {
+    let seed = zeroize::Zeroizing::new(seed);
     let account = AccountId::try_from(account_index)
         .map_err(|_| "The ZIP-32 account index is invalid.".to_owned())?;
     let usk = UnifiedSpendingKey::from_seed(&Network::TestNetwork, &seed, account)

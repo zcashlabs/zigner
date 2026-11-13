@@ -9,6 +9,10 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -19,7 +23,8 @@ android {
         applicationId = "org.zcash.airgap.airgapped_zcash_signer"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // Per-operation CryptoObject authentication with device-credential fallback.
+        minSdk = 30
         targetSdk = flutter.targetSdkVersion
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
         // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
@@ -30,12 +35,22 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Exercise real authenticated crypto without touching the user's app data.
+            if (providers.gradleProperty("zignerVaultSelfTest").orNull == "true") {
+                applicationIdSuffix = ".vault_test"
+                manifestPlaceholders["appLabel"] = "Zigner vault self-test"
+            }
+        }
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // Production signing must be configured explicitly; never ship a debug-signed release.
+            signingConfig = null
         }
     }
+
+    defaultConfig.manifestPlaceholders["appLabel"] = "Zigner"
+
+    sourceSets.getByName("test").resources.srcDir("src/main/res/raw")
 }
 
 kotlin {
@@ -46,4 +61,8 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
 }

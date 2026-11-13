@@ -1859,6 +1859,7 @@ dependencies = [
  "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-transparent",
+ "zeroize",
  "zip32",
 ]
 

@@ -1,4 +1,4 @@
-import 'package:airgapped_zcash_signer/src/screens/home_screen.dart';
+import 'package:airgapped_zcash_signer/src/security/vault_gate.dart';
 import 'package:airgapped_zcash_signer/src/theme/signer_theme.dart';
 import 'package:flutter/material.dart';
 
@@ -9,16 +9,31 @@ class SignerApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Zcash Testnet Airgap Signer',
+      title: 'Zigner',
+      builder: (context, child) =>
+          PrivacyShield(child: child ?? const SizedBox.shrink()),
       theme: ThemeData(
         brightness: Brightness.dark,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: SignerColors.gold,
+          seedColor: SignerColors.mint,
           brightness: Brightness.dark,
           surface: SignerColors.surface,
         ),
         scaffoldBackgroundColor: SignerColors.background,
-        fontFamily: 'sans-serif',
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: SignerColors.surface,
+          contentPadding: const EdgeInsets.all(18),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: SignerColors.border),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: SignerColors.border),
+          ),
+        ),
+        fontFamily: 'Inter',
         appBarTheme: const AppBarTheme(
           backgroundColor: Colors.transparent,
           foregroundColor: SignerColors.text,
@@ -36,47 +51,52 @@ class SignerApp extends StatelessWidget {
         ),
         filledButtonTheme: FilledButtonThemeData(
           style: FilledButton.styleFrom(
-            backgroundColor: SignerColors.gold,
+            backgroundColor: SignerColors.mint,
             foregroundColor: SignerColors.background,
-            minimumSize: const Size.fromHeight(58),
+            minimumSize: const Size.fromHeight(56),
             textStyle: const TextStyle(
+              fontFamily: 'Manrope',
               fontSize: 16,
-              fontWeight: FontWeight.w800,
+              fontWeight: FontWeight.w700,
             ),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(16),
             ),
           ),
         ),
         outlinedButtonTheme: OutlinedButtonThemeData(
           style: OutlinedButton.styleFrom(
             foregroundColor: SignerColors.text,
-            minimumSize: const Size.fromHeight(58),
+            minimumSize: const Size.fromHeight(56),
             side: const BorderSide(color: SignerColors.border),
             backgroundColor: SignerColors.surface,
             textStyle: const TextStyle(
-              fontSize: 15,
+              fontFamily: 'Manrope',
+              fontSize: 16,
               fontWeight: FontWeight.w700,
             ),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(16),
             ),
           ),
         ),
         textTheme: const TextTheme(
           displaySmall: TextStyle(
             color: SignerColors.text,
-            fontSize: 40,
+            fontFamily: 'Manrope',
+            fontSize: 32,
             fontWeight: FontWeight.w700,
-            letterSpacing: -1.8,
-            height: 1.05,
+            letterSpacing: -0.7,
+            height: 1.15,
           ),
           headlineSmall: TextStyle(
+            fontFamily: 'Manrope',
             color: SignerColors.text,
             fontWeight: FontWeight.w700,
             letterSpacing: -0.6,
           ),
           titleMedium: TextStyle(
+            fontFamily: 'Manrope',
             color: SignerColors.text,
             fontWeight: FontWeight.w700,
           ),
@@ -85,7 +105,7 @@ class SignerApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const HomeScreen(),
+      home: const VaultGate(),
     );
   }
 }

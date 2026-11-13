@@ -22,6 +22,7 @@ zcash_keys = { package = "zakura-keys", version = "=4.0.0", features = ["orchard
 zcash_protocol = { package = "zakura-protocol", version = "=4.0.0" }
 zip32 = "0.2"
 rand = "0.10"
+zeroize = "1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
