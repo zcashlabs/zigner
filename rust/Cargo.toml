@@ -24,5 +24,9 @@ zip32 = "0.2"
 rand = "0.10"
 zeroize = "1"
 
+[dev-dependencies]
+pczt = { package = "zakura-pczt", version = "=0.1.0-rc9", features = ["zcp-builder"] }
+zcash_primitives = { package = "zakura-primitives", version = "=4.0.0", default-features = false, features = ["pczt", "std"] }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
