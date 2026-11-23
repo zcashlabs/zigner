@@ -58,7 +58,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
               ),
               const SizedBox(height: 16),
               const Text(
-                'This total may include change. Hidden outputs and the fee are not fully represented here.',
+                'Requests with transparent or Sapling outputs are refused, so every output is listed below. This total may include change and excludes the fee.',
                 style: TextStyle(fontSize: 13, height: 1.55),
               ),
             ],

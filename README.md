@@ -41,7 +41,7 @@ are implemented in Rust and exposed through `flutter_rust_bridge`.
 - Display transaction details for user approval.
 - Sign account 0 Orchard and Ironwood spends.
 - Return signatures as an animated `zcash-batch-sig-result` UR.
-- Reject mainnet requests, transparent spends, and Sapling spends.
+- Reject mainnet requests, transparent inputs or outputs, and any Sapling spends or outputs.
 
 Release and profile Android manifests do not request `INTERNET`. The debug
 manifest requests it only so Flutter's development VM service and hot reload
