@@ -159,6 +159,31 @@ fn decode_batch(cbor: Vec<u8>) -> Result<(ZcashSignBatch, BatchSignRequest), Str
     Ok((envelope, request))
 }
 
+/// Rejects transaction effects that the review screen cannot show.
+///
+/// The Orchard and Ironwood spend authorization signatures cover the shielded
+/// sighash, which also commits to the transparent and Sapling bundles. Any
+/// effect in those pools would therefore be authorized without being displayed.
+fn reject_unreviewable_pools(pczt: &pczt::Pczt) -> Result<(), String> {
+    if !pczt.transparent().inputs().is_empty() || !pczt.sapling().spends().is_empty() {
+        return Err("This signer currently accepts Orchard and Ironwood spends only.".to_owned());
+    }
+    if !pczt.transparent().outputs().is_empty() {
+        return Err(
+            "This signer cannot display transparent outputs, so it refuses requests that contain them."
+                .to_owned(),
+        );
+    }
+    let sapling = pczt.sapling();
+    if !sapling.outputs().is_empty() || *sapling.value_sum() != 0 {
+        return Err(
+            "This signer cannot display Sapling outputs, so it refuses requests that contain them."
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 #[flutter_rust_bridge::frb(sync)]
 pub fn inspect_vizor_batch(cbor: Vec<u8>) -> Result<BatchReview, String> {
     let (envelope, request) = decode_batch(cbor.clone())?;
@@ -168,11 +193,7 @@ pub fn inspect_vizor_batch(cbor: Vec<u8>) -> Result<BatchReview, String> {
     let mut hidden_values = false;
     let mut outputs = Vec::new();
     for pczt in request.pczts() {
-        if !pczt.transparent().inputs().is_empty() || !pczt.sapling().spends().is_empty() {
-            return Err(
-                "This signer currently accepts Orchard and Ironwood spends only.".to_owned(),
-            );
-        }
+        reject_unreviewable_pools(pczt)?;
         orchard_spends += pczt
             .orchard()
             .actions()
@@ -388,6 +409,58 @@ mod tests {
         assert_eq!(account.get_index(), 0);
         assert_eq!(account.get_name().as_deref(), Some("Airgap phone"));
         assert!(account.get_ufvk().starts_with("uviewtest"));
+    }
+
+    mod output_policy {
+        use super::*;
+        use crate::test_fixtures::{build_pczt, sign_batch_cbor, ExtraOutput, SEED};
+
+        #[test]
+        fn shielded_only_request_is_reviewed_and_signed() {
+            let cbor = sign_batch_cbor(vec![build_pczt(ExtraOutput::None)]);
+            let review = inspect_vizor_batch(cbor.clone()).unwrap();
+            assert_eq!(review.transaction_count, 1);
+            assert_eq!(review.orchard_spend_count, 0);
+            assert_eq!(review.ironwood_spend_count, 1);
+
+            // The response also carries the IO finalizer's padding-spend signature.
+            let signed = sign_vizor_batch(cbor, SEED.to_vec(), 0).unwrap();
+            assert!(signed.signature_count >= review.ironwood_spend_count);
+        }
+
+        #[test]
+        fn transparent_output_is_rejected_before_review_and_signing() {
+            let pczt = build_pczt(ExtraOutput::Transparent);
+            assert_eq!(pczt.transparent().outputs().len(), 1);
+            let cbor = sign_batch_cbor(vec![pczt]);
+
+            let error = inspect_vizor_batch(cbor.clone()).unwrap_err();
+            assert!(error.contains("transparent outputs"), "{error}");
+            let error = sign_vizor_batch(cbor, SEED.to_vec(), 0).unwrap_err();
+            assert!(error.contains("transparent outputs"), "{error}");
+        }
+
+        #[test]
+        fn sapling_output_is_rejected_before_review_and_signing() {
+            let pczt = build_pczt(ExtraOutput::Sapling);
+            assert!(!pczt.sapling().outputs().is_empty());
+            let cbor = sign_batch_cbor(vec![pczt]);
+
+            let error = inspect_vizor_batch(cbor.clone()).unwrap_err();
+            assert!(error.contains("Sapling outputs"), "{error}");
+            let error = sign_vizor_batch(cbor, SEED.to_vec(), 0).unwrap_err();
+            assert!(error.contains("Sapling outputs"), "{error}");
+        }
+
+        #[test]
+        fn one_unshown_output_rejects_the_whole_batch() {
+            let cbor = sign_batch_cbor(vec![
+                build_pczt(ExtraOutput::None),
+                build_pczt(ExtraOutput::Transparent),
+            ]);
+            assert!(inspect_vizor_batch(cbor.clone()).is_err());
+            assert!(sign_vizor_batch(cbor, SEED.to_vec(), 0).is_err());
+        }
     }
 
     #[test]
