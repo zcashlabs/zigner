@@ -1,8 +1,12 @@
 use std::sync::{LazyLock, Mutex};
 
-use pczt::roles::signer::{
-    batch::{BatchSignRequest, BatchSignResponse},
-    extract_orchard_spend_auth_signatures, Signer,
+use orchard::pczt::VerifyError;
+use pczt::roles::{
+    signer::{
+        batch::{BatchSignRequest, BatchSignResponse},
+        extract_orchard_spend_auth_signatures, Signer,
+    },
+    verifier::{OrchardError, Verifier},
 };
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use sha2::Digest;
@@ -14,7 +18,10 @@ use ur_registry::{
         zcash_unified_full_viewing_key::ZcashUnifiedFullViewingKey,
     },
 };
-use zcash_keys::keys::UnifiedSpendingKey;
+use zcash_keys::{
+    address::{Address, UnifiedAddress},
+    keys::UnifiedSpendingKey,
+};
 use zcash_protocol::consensus::Network;
 use zip32::{fingerprint::SeedFingerprint, AccountId};
 
@@ -159,13 +166,118 @@ fn decode_batch(cbor: Vec<u8>) -> Result<(ZcashSignBatch, BatchSignRequest), Str
     Ok((envelope, request))
 }
 
+/// An Orchard-protocol output whose value and recipient were checked against
+/// the commitments that the spend authorization signature covers.
+struct VerifiedOutput {
+    value: u64,
+    address: String,
+}
+
+/// Verifies every Orchard and Ironwood output of `pczt` before it is shown.
+///
+/// The signature commits to each action's `cmx` and `cv_net`, not to the
+/// `value` and `user_address` metadata, so each displayed output must be
+/// recomputed from `recipient`, `value`, `rseed` and `rcv`. Outputs missing
+/// any of those fields are refused rather than shown as redacted.
+fn verified_outputs(pczt: &pczt::Pczt) -> Result<Vec<VerifiedOutput>, String> {
+    let mut outputs = Vec::new();
+    let mut verifier = Verifier::new(pczt.clone());
+    if !pczt.orchard().actions().is_empty() {
+        verifier = verifier
+            .with_orchard(|bundle| verify_bundle_outputs(bundle, &mut outputs))
+            .map_err(|e| unverifiable_bundle("Orchard", e))?;
+    }
+    if !pczt.ironwood().actions().is_empty() {
+        verifier
+            .with_ironwood(|bundle| verify_bundle_outputs(bundle, &mut outputs))
+            .map_err(|e| unverifiable_bundle("Ironwood", e))?;
+    }
+    Ok(outputs)
+}
+
+fn verify_bundle_outputs(
+    bundle: &orchard::pczt::Bundle,
+    outputs: &mut Vec<VerifiedOutput>,
+) -> Result<(), OrchardError<String>> {
+    for (index, action) in bundle.actions().iter().enumerate() {
+        let output = verify_action_output(action)
+            .map_err(|e| OrchardError::Custom(format!("output {} {e}", index + 1)))?;
+        outputs.push(output);
+    }
+    Ok(())
+}
+
+fn verify_action_output(action: &orchard::pczt::Action) -> Result<VerifiedOutput, String> {
+    let output = action.output();
+    // Requires `recipient`, `value` and `rseed`, and recomputes `cmx` from them.
+    output
+        .verify_note_commitment(action.spend())
+        .map_err(|e| describe_verify_error("note commitment", e))?;
+    // Requires both note values and `rcv`, and recomputes `cv_net` from them.
+    action
+        .verify_cv_net()
+        .map_err(|e| describe_verify_error("value commitment", e))?;
+    let (Some(recipient), Some(value)) = (output.recipient(), output.value()) else {
+        return Err("lacks its recipient or value".to_owned());
+    };
+    Ok(VerifiedOutput {
+        value: value.inner(),
+        address: display_address(output.user_address().as_deref(), recipient)?,
+    })
+}
+
+/// Returns the address to display for a verified `recipient`.
+///
+/// A supplied `user_address` is shown only if it is a testnet unified address
+/// whose Orchard receiver is the committed recipient (Ironwood shares that
+/// receiver). Without one, the recipient itself is encoded for display.
+fn display_address(
+    user_address: Option<&str>,
+    recipient: &orchard::Address,
+) -> Result<String, String> {
+    match user_address {
+        Some(user_address) => match Address::decode(&Network::TestNetwork, user_address) {
+            Some(Address::Unified(address)) if address.orchard() == Some(recipient) => {
+                Ok(user_address.to_owned())
+            }
+            _ => Err(
+                "has a user address that is not a testnet unified address for its committed recipient"
+                    .to_owned(),
+            ),
+        },
+        None => UnifiedAddress::from_receivers(Some(*recipient), None)
+            .map(|address| address.encode(&Network::TestNetwork))
+            .ok_or_else(|| "has a recipient that cannot be encoded".to_owned()),
+    }
+}
+
+fn describe_verify_error(commitment: &str, error: VerifyError) -> String {
+    match error {
+        VerifyError::MissingRecipient
+        | VerifyError::MissingValue
+        | VerifyError::MissingRandomSeed
+        | VerifyError::MissingValueCommitTrapdoor => {
+            format!("lacks the data needed to verify its {commitment} ({error:?})")
+        }
+        _ => format!("does not match its {commitment} ({error:?})"),
+    }
+}
+
+fn unverifiable_bundle(pool: &str, error: OrchardError<String>) -> String {
+    match error {
+        OrchardError::Custom(reason) => {
+            format!("Refusing to sign: {pool} {reason}.")
+        }
+        error => format!("Refusing to sign: the {pool} bundle could not be verified ({error:?})."),
+    }
+}
+
 #[flutter_rust_bridge::frb(sync)]
 pub fn inspect_vizor_batch(cbor: Vec<u8>) -> Result<BatchReview, String> {
     let (envelope, request) = decode_batch(cbor.clone())?;
     let mut orchard_spends = 0usize;
     let mut ironwood_spends = 0usize;
     let mut visible_output_total = 0u64;
-    let mut hidden_values = false;
     let mut outputs = Vec::new();
     for pczt in request.pczts() {
         if !pczt.transparent().inputs().is_empty() || !pczt.sapling().spends().is_empty() {
@@ -185,46 +297,20 @@ pub fn inspect_vizor_batch(cbor: Vec<u8>) -> Result<BatchReview, String> {
             .iter()
             .filter(|action| action.spend().spend_auth_sig().is_none())
             .count();
-        for action in pczt
-            .orchard()
-            .actions()
-            .iter()
-            .chain(pczt.ironwood().actions().iter())
-        {
-            let value_label = action
-                .output()
-                .value()
-                .map(|value| format!("{value} zat"))
-                .unwrap_or_else(|| "redacted value".to_owned());
-            let address = action
-                .output()
-                .user_address()
-                .as_deref()
-                .unwrap_or("redacted recipient");
-            outputs.push(format!("{value_label} → {address}"));
-            match action.output().value() {
-                Some(value) => {
-                    visible_output_total = visible_output_total
-                        .checked_add(*value)
-                        .ok_or_else(|| "Visible output total overflowed u64".to_owned())?;
-                }
-                None => hidden_values = true,
-            }
+        for VerifiedOutput { value, address } in verified_outputs(pczt)? {
+            outputs.push(format!("{value} zat → {address}"));
+            visible_output_total = visible_output_total
+                .checked_add(value)
+                .ok_or_else(|| "Visible output total overflowed u64".to_owned())?;
         }
     }
     let signature_count = orchard_spends + ironwood_spends;
     if signature_count == 0 || signature_count > MAX_BATCH_SIGNATURES {
         return Err("Vizor signing batch has an unsupported signature count.".to_owned());
     }
-    let mut warnings = vec![
+    let warnings = vec![
         "Testnet only. Confirm the transaction details shown in Vizor before signing.".to_owned(),
     ];
-    if hidden_values {
-        warnings.push(
-            "Some output values are redacted in the compact PCZT; the displayed total is incomplete."
-                .to_owned(),
-        );
-    }
     Ok(BatchReview {
         request_id_hex: hex::encode(envelope.get_request_id()),
         transaction_count: request.pczts().len() as u32,
@@ -397,5 +483,137 @@ mod tests {
             receive_vizor_ur_part("ur:bytes/abcd".to_owned()).unwrap_err(),
             "Expected a zcash-sign-batch QR from Vizor."
         );
+    }
+
+    mod output_binding {
+        use pczt::{roles::redactor::Redactor, Pczt};
+
+        use super::*;
+        use crate::test_fixtures::{
+            build_pczt, change_address, own_user_address, payee_action_index, payee_user_address,
+            set_user_address, sign_batch_cbor, spoof_payee_value, vizor_compact_view, CHANGE_VALUE,
+            PAYMENT_VALUE, SEED,
+        };
+
+        /// Asserts that both review and signing refuse the request, and returns
+        /// the review error.
+        fn assert_refused(pczt: Pczt) -> String {
+            let cbor = sign_batch_cbor(vec![pczt]);
+            let review_error = inspect_vizor_batch(cbor.clone()).unwrap_err();
+            let sign_error = sign_vizor_batch(cbor, SEED.to_vec(), 0).unwrap_err();
+            assert_eq!(review_error, sign_error);
+            review_error
+        }
+
+        fn redact_payee(
+            pczt: Pczt,
+            f: impl FnOnce(&mut pczt::roles::redactor::orchard::ActionRedactor<'_>),
+        ) -> Pczt {
+            let index = payee_action_index(&pczt);
+            Redactor::new(pczt)
+                .redact_ironwood_with(|mut bundle| {
+                    bundle.redact_action(index, |mut action| f(&mut action));
+                })
+                .finish()
+        }
+
+        fn assert_honest_review(review: &BatchReview) {
+            assert!(
+                review
+                    .outputs
+                    .contains(&format!("{PAYMENT_VALUE} zat → {}", payee_user_address())),
+                "{:?}",
+                review.outputs
+            );
+            assert!(
+                review
+                    .outputs
+                    .contains(&format!("{CHANGE_VALUE} zat → {}", change_address())),
+                "{:?}",
+                review.outputs
+            );
+            assert!(!review
+                .outputs
+                .iter()
+                .any(|output| output.contains("redacted")));
+            assert_eq!(
+                review.visible_output_total_zat,
+                PAYMENT_VALUE + CHANGE_VALUE
+            );
+        }
+
+        #[test]
+        fn honest_request_is_reviewed_and_signed() {
+            let cbor = sign_batch_cbor(vec![build_pczt()]);
+            assert_honest_review(&inspect_vizor_batch(cbor.clone()).unwrap());
+            assert!(sign_vizor_batch(cbor, SEED.to_vec(), 0).is_ok());
+        }
+
+        #[test]
+        fn honest_compact_vizor_request_is_reviewed_and_signed() {
+            let pczt = vizor_compact_view(build_pczt());
+            let cbor = sign_batch_cbor(vec![pczt]);
+            assert_honest_review(&inspect_vizor_batch(cbor.clone()).unwrap());
+            assert!(sign_vizor_batch(cbor, SEED.to_vec(), 0).is_ok());
+        }
+
+        #[test]
+        fn spoofed_value_is_refused() {
+            let error = assert_refused(spoof_payee_value(build_pczt(), PAYMENT_VALUE - 10_000));
+            assert!(
+                error.contains("does not match its note commitment"),
+                "{error}"
+            );
+        }
+
+        #[test]
+        fn spoofed_user_address_is_refused() {
+            let pczt = build_pczt();
+            let index = payee_action_index(&pczt);
+            let spoofed = set_user_address(pczt, index, own_user_address());
+            let error = assert_refused(spoofed);
+            assert!(error.contains("user address"), "{error}");
+        }
+
+        #[test]
+        fn spoofed_user_address_is_refused_in_compact_view() {
+            let pczt = build_pczt();
+            let index = payee_action_index(&pczt);
+            let spoofed = vizor_compact_view(set_user_address(pczt, index, own_user_address()));
+            let error = assert_refused(spoofed);
+            assert!(error.contains("user address"), "{error}");
+        }
+
+        #[test]
+        fn non_address_user_address_is_refused() {
+            let pczt = build_pczt();
+            let index = payee_action_index(&pczt);
+            let error = assert_refused(set_user_address(pczt, index, "Alice".to_owned()));
+            assert!(error.contains("user address"), "{error}");
+        }
+
+        #[test]
+        fn missing_rseed_is_refused() {
+            let error = assert_refused(redact_payee(build_pczt(), |a| a.clear_output_rseed()));
+            assert!(error.contains("MissingRandomSeed"), "{error}");
+        }
+
+        #[test]
+        fn missing_recipient_is_refused() {
+            let error = assert_refused(redact_payee(build_pczt(), |a| a.clear_output_recipient()));
+            assert!(error.contains("MissingRecipient"), "{error}");
+        }
+
+        #[test]
+        fn missing_value_is_refused() {
+            let error = assert_refused(redact_payee(build_pczt(), |a| a.clear_output_value()));
+            assert!(error.contains("MissingValue"), "{error}");
+        }
+
+        #[test]
+        fn missing_rcv_is_refused() {
+            let error = assert_refused(redact_payee(build_pczt(), |a| a.clear_rcv()));
+            assert!(error.contains("MissingValueCommitTrapdoor"), "{error}");
+        }
     }
 }
